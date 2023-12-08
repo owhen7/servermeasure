@@ -1,17 +1,14 @@
 #Owen Wexler and Dylan Pourkay.
-
-#import logging
 import numpy as np
-import logging
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-from scapy.all import * 
+from scapy.layers.http import HTTP, HTTPRequest, HTTPResponse
+from scapy.layers.inet import TCP, IP
+
+from scapy.all import *
 import sys
-import time
-import math
+
 
 def calculate_percentiles(response_times):
     sorted_data = sorted(response_times)
-
     n = len(sorted_data)
     p25_index = int(0.25 * n)
     p50_index = int(0.50 * n)
@@ -25,92 +22,64 @@ def calculate_percentiles(response_times):
     p95 = sorted_data[p95_index]
     p99 = sorted_data[p99_index]
 
-    print(f"PERCENTILES: {p25:.5f} {p50:.5f} {p75:.5f} {p95:.5f} {p99:.5f}")
-    
+    print(f"PERCENTILES: {p25} {p50} {p75} {p95} {p99}")
 
+def processTheProcessedFile(sessions, server_ip, server_port):
+    http_requests = {}
+    response_times = []
 
-def with_numpy_calculate_percentiles(data):
-    # Calculate percentiles using NumPy
-
-    p25 = np.percentile(data, 25)
-    p50 = np.percentile(data, 50)
-    p75 = np.percentile(data, 75)
-    p95 = np.percentile(data, 95)
-    p99 = np.percentile(data, 99)
-
-    #Print the result with at least 5 digits of accuracy to the left of the decimal point
-    print(f"PERCENTILES: {p25:.5f} {p50:.5f} {p75:.5f} {p95:.5f} {p99:.5f}")
-
-
-def processTheProcessedFile(sessions):
-
-    http_requests = {}  # Dictionary to store HTTP requests temporarily. We empty this by the end.
-    http_tuples = []    # List to store matched request and response tuples
-    response_times = []  # List to store server response times
-    number_of_packets_total = 0  
-    number_of_tcp_packets = 0
-    number_of_udp_packets = 0
-    request_counter = 0
-    response_counter = 0
-
-    #Note: There is only one "session" per test case, so "sessions" just contains the one session.
-
-    for session in sessions:                   
-        for packet in sessions[session]:    # for each packet in each session
-            number_of_packets_total = number_of_packets_total + 1  #increment total packet count 
-            if packet.haslayer(TCP):        # check is the packet is a TCP packet
-
-                number_of_tcp_packets = number_of_tcp_packets + 1   # count TCP packets 
-                source_ip = packet[IP].src   # note that a packet is represented as a python hash table with keys corresponding to 
-                dest_ip = packet[IP].dst     # layer field names and the values of the hash table as the packet field values
-                
-                if packet.haslayer(HTTP):
-                    if HTTPRequest in packet:   
-                        arrival_time = packet.time
-                        request_info = (arrival_time, dest_ip, packet) # WE "REMEMBER" the arrival time and the TCP ports and IP addresses HERE.
-                        request_id = (source_ip, dest_ip, packet[TCP].sport) # We use this to uniquely identify shit in the dictionary.
+    for session in sessions:
+        for pkt in sessions[session]:
+            if pkt.haslayer(HTTP):
+                source_ip = pkt[IP].src
+                dest_ip = pkt[IP].dst
+                if HTTPRequest in pkt:
+                    if str(pkt[IP].dst) == server_ip and str(pkt[TCP].dport) == server_port:
+                        arrival_time = pkt.time
+                        request_info = (arrival_time, dest_ip, pkt)
+                        request_id = (source_ip, dest_ip, pkt[IP].sport)
                         http_requests[request_id] = request_info
-                        request_counter = request_counter + 1
-
-                    elif HTTPResponse in packet:
-                        response_counter = response_counter + 1
-                        response_id = (dest_ip, source_ip, packet[TCP].dport) 
-
-                        if response_id in http_requests:
-                            response_info = (packet.time, source_ip, packet)
-                            request_info = http_requests[response_id]
-
-                            #time_difference = response_info[0] - request_info[0]
-                            time_difference = float(response_info[0] - request_info[0])
-
-                            response_times.append(time_difference)
-                            http_tuples.append((http_requests[response_id], response_info))
-                            del http_requests[response_id]  # remove matched request from the dictionary
-            else:
-                if packet.haslayer(UDP):
-                    number_of_udp_packets = number_of_udp_packets + 1
-
+                elif HTTPResponse in pkt:
+                    response_id = (dest_ip, source_ip, pkt[IP].dport)
+                    if response_id in http_requests and (str(pkt[IP].src) == server_ip and str(pkt[TCP].sport) == server_port):
+                        response_info = (pkt.time, source_ip, pkt)
+                        request_info = http_requests[response_id]
+                        time_difference = float(response_info[0] - request_info[0])
+                        response_times.append(time_difference)
+                        del http_requests[response_id]
         average_response_time = sum(response_times) / len(response_times)
-        print(f"AVERAGE LATENCY: {average_response_time:.5f}")
-        #This function prints out the percentiles.
-
-
+        print(f"AVERAGE LATENCY: {average_response_time}")
         calculate_percentiles(response_times)
-    #with_numpy_calculate_percentiles(response_times)
+        print(f"KL DIVERGENCE: {compute_kl_divergence(response_times)}")
 
+def exponential_cdf(x, lambda_param):
+    return 1 - np.exp(-lambda_param * x)
 
-    #DEBUGGING SHIT. PRINT IF YOU WANT.
-    # print("Got %d packets total, %d TCP packets and %d UDP packets" % (number_of_packets_total, number_of_tcp_packets,number_of_udp_packets))
-    # print(request_counter)
-    # print(response_counter)
-    # print("Server Response Times:")
-    # for idx, time_difference in enumerate(response_times, start=1):
-    #     print(f"Response {idx}: {time_difference} seconds")
-    #Print Average Latency.
-    
+def compute_kl_divergence(latencies):
+    num_buckets = 10
+    max_latency = max(latencies)
+    bucket_edges = np.linspace(0, max_latency, num_buckets + 1)
+    bucket_edges[num_buckets] = float('inf')
+    bucket_counts, _ = np.histogram(latencies, bins=bucket_edges)
+    total_counts = sum(bucket_counts)
+    measured_distribution = [count / total_counts for count in bucket_counts]
+
+    mean_latency = np.mean(latencies)
+    lambda_param = 1.0 / mean_latency
+
+    modeled_distribution = []
+    for i in range(num_buckets):
+        lower_bound = bucket_edges[i]
+        upper_bound = bucket_edges[i + 1] if i != num_buckets - 1 else float('inf')
+        prob_mass = exponential_cdf(upper_bound, lambda_param) - exponential_cdf(lower_bound, lambda_param)
+        modeled_distribution.append(prob_mass)
+    kl_divergence = 0
+    for p, q in zip(measured_distribution, modeled_distribution):
+        if p > 0 and q > 0:
+            kl_divergence += p * np.log2(p / q)
+    return kl_divergence
 
 def main():
-
     #python measure-webserver.py pcap1.pcap 93.184.216.34 80
     if len(sys.argv) != 4:
         print("USAGE: python3 measurewebserver.py [input-file] [server-ip] [server-port]")
@@ -120,12 +89,11 @@ def main():
     server_ip = sys.argv[2]
     server_port = sys.argv[3]
 
-    # make sure to load the HTTP layer or your code wil silently fail
     load_layer("http")
-    processed_file = rdpcap(pcap_filename)  # read in the pcap file 
-    sessions = processed_file.sessions()    #  get the list of sessions 
+    processed_file = rdpcap(pcap_filename)
+    sessions = processed_file.sessions()
 
-    processTheProcessedFile(sessions)
+    processTheProcessedFile(sessions, server_ip, server_port)
 
 if __name__ == "__main__":
     main()
